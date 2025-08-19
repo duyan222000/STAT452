@@ -65,11 +65,11 @@ forest_clean <- forest[-influential, ]
 # https://www.r-bloggers.com/2022/01/handling-categorical-data-in-r-part-1/
 # We convert it to factor so when needed, R can create dummy tables
 forest_clean$month <- factor(forest_clean$month,
-                       levels = c("jan", "feb", "mar", "apr", "may", "jun",
-                                  "jul", "aug", "sep", "oct", "nov", "dec"))
+                             levels = c("jan", "feb", "mar", "apr", "may", "jun",
+                                        "jul", "aug", "sep", "oct", "nov", "dec"))
 
 forest_clean$day <- factor(forest_clean$day,
-                     levels = c("mon", "tue", "wed", "thu", "fri", "sat", "sun"))
+                           levels = c("mon", "tue", "wed", "thu", "fri", "sat", "sun"))
 
 str(forest_clean)
 
@@ -97,7 +97,7 @@ ggplot(forest_clean, aes(x = month, y = log_area)) + geom_boxplot(outlier.alpha 
 ggplot(forest_clean, aes(x = day, y = log_area)) +
   geom_boxplot(outlier.alpha = 0.4) +
   labs(title = "Burned Area (log scale) by Day of Week in Montesinho Park",
-  x = "Day of Week", y = "log(1+Area)") +
+       x = "Day of Week", y = "log(1+Area)") +
   theme_minimal(base_size = 12)
 
 # Boxplots for numeric predictors
@@ -121,7 +121,7 @@ trainTestSplit = function(data, seed, trainRatio = 0.8){
   trainData = data[trainIndex,]
   testData = data[-trainIndex,]
   return(list(train = trainData, test = testData))
-  }
+}
 fire.split = trainTestSplit(forest_clean, 0, trainRatio = 0.8)
 fire.train = fire.split$train
 fire.test = fire.split$test
@@ -280,10 +280,9 @@ plot(th, rec_curve, type = "l",
      main = "Recall vs Threshold (Fire Occurrence Prediction)",
      xlab = "Classification Threshold", ylab = "Recall")
 
+roc_obj <- roc(response = y_test_clf, predictor = as.numeric(test_prob))
+auc_val <- auc(roc_obj)
+cat(sprintf("AUC: %.3f\n", auc_val))
 
-
-# Optional AUC
-# install.packages("pROC")
-library(pROC)
-auc <- roc(response = y_test_clf, predictor = as.numeric(test_prob))$auc
-cat(sprintf("AUC: %.3f\n", auc))
+plot(roc_obj, col = "blue", lwd = 2, main = "ROC Curve for Logistic Regression")
+abline(a = 0, b = 1, lty = 2, col = "red")  # diagonal reference
