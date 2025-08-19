@@ -26,9 +26,9 @@ hist(forest$area, breaks = 50, main = "Distribution of Burned Area", xlab = "Are
 forest$log_area <- log1p(forest$area)
 model <- lm(log_area ~ ., data = forest %>% select(-area))
 
-hist(forest$log_area, 
-     breaks = 50, 
-     main = "Distribution of Burned Area (Log Transformed)", 
+hist(forest$log_area,
+     breaks = 50,
+     main = "Distribution of Burned Area (Log Transformed)",
      xlab = "log(1 + Area)")
 
 # Cleanup dataset. Are there any outliers ? Are there any missing values in any of the features ?
@@ -40,9 +40,15 @@ colSums(is.na(forest))
 # Calculate cook distance
 cooksd <- cooks.distance(model)
 
-# Plot cook distance
-plot(cooksd, type = "h", main = "Cook's Distance", ylab = "Distance")
-abline(h = 4/length(cooksd), col = "red", lty = 2)
+cooksd[!is.finite(cooksd)] <- 0
+
+plot(
+  cooksd, type = "h",
+  ylim = c(0, max(cooksd) * 1.1),
+  main = "Cook's Distance for Influential Observations",
+  ylab = "Cook's Distance"
+)
+abline(h = 4 / length(cooksd), col = "red", lty = 2)
 
 # Identify influential points
 threshold <- 4 / length(cooksd)
@@ -50,8 +56,7 @@ influential <- as.numeric(names(cooksd)[(cooksd > threshold)])
 influential <- influential[!is.na(influential)]
 influential
 # Show how many are removed
-cat("Removed:", length(influential), " (", 
-    round(100*length(influential)/nrow(forest), 1), "%)\n", sep="")
+cat("Removed:", length(influential), " (",round(100*length(influential)/nrow(forest), 1), "%)\n", sep="")
 
 # Remove influential observations
 forest_clean <- forest[-influential, ]
@@ -59,11 +64,11 @@ forest_clean <- forest[-influential, ]
 # Handle categorial features
 # https://www.r-bloggers.com/2022/01/handling-categorical-data-in-r-part-1/
 # We convert it to factor so when needed, R can create dummy tables
-forest_clean$month <- factor(forest_clean$month, 
-                       levels = c("jan", "feb", "mar", "apr", "may", "jun", 
+forest_clean$month <- factor(forest_clean$month,
+                       levels = c("jan", "feb", "mar", "apr", "may", "jun",
                                   "jul", "aug", "sep", "oct", "nov", "dec"))
 
-forest_clean$day <- factor(forest_clean$day, 
+forest_clean$day <- factor(forest_clean$day,
                      levels = c("mon", "tue", "wed", "thu", "fri", "sat", "sun"))
 
 str(forest_clean)
@@ -71,12 +76,19 @@ str(forest_clean)
 num_df <- forest_clean |> select(where(is.numeric))
 corr_mat <- cor(num_df, method = "spearman", use = "pairwise.complete.obs")
 # Correlation heatmap
-corrplot(corr_mat, type = "upper", order = "hclust", tl.cex = 0.7,
-         main = "Correlation of Fire-Related Variables (Montesinho Park)")
+corrplot(
+  corr_mat,
+  type = "upper",
+  order = "hclust",
+  tl.cex = 0.6,            # smaller text size
+  tl.col = "black",        # text color
+  tl.srt = 45,             # rotate labels 45 degrees
+  main = "Correlation of Fire-Related Variables (Montesinho Park)",
+  mar = c(0,0,2,0)         # adjust plot margins
+)
 
 # Boxplot of log_area by month
-ggplot(forest_clean, aes(x = month, y = log_area)) +
-  geom_boxplot(outlier.alpha = 0.4) +
+ggplot(forest_clean, aes(x = month, y = log_area)) + geom_boxplot(outlier.alpha = 0.4) +
   labs(title = "Burned Area (log scale) by Month in Montesinho Park",
        x = "Month", y = "log(1+Area)") +
   theme_minimal(base_size = 12)
@@ -85,7 +97,7 @@ ggplot(forest_clean, aes(x = month, y = log_area)) +
 ggplot(forest_clean, aes(x = day, y = log_area)) +
   geom_boxplot(outlier.alpha = 0.4) +
   labs(title = "Burned Area (log scale) by Day of Week in Montesinho Park",
-       x = "Day of Week", y = "log(1+Area)") +
+  x = "Day of Week", y = "log(1+Area)") +
   theme_minimal(base_size = 12)
 
 # Boxplots for numeric predictors
@@ -109,7 +121,7 @@ trainTestSplit = function(data, seed, trainRatio = 0.8){
   trainData = data[trainIndex,]
   testData = data[-trainIndex,]
   return(list(train = trainData, test = testData))
-}
+  }
 fire.split = trainTestSplit(forest_clean, 0, trainRatio = 0.8)
 fire.train = fire.split$train
 fire.test = fire.split$test
@@ -137,11 +149,11 @@ plot(cv.ridge);   title("Ridge CV",   line = 2.5)
 # Lasso Regression
 cv.lasso <- cv.glmnet(x_train, y_train, alpha = 1, standardize = TRUE)
 lasso.model <- glmnet(x_train, y_train, lambda = cv.lasso$lambda.min, alpha = 1)
-plot(cv.lasso);   title("LASSO CV",   line = 2.5)
+plot(cv.lasso);   title("LASSO CV", line = 2.5)
 
 nz <- as.matrix(coef(lasso.model))
-nz <- nz[nz[,1] != 0, , drop = FALSE]               # keep non-zero
-nz <- nz[order(abs(nz[,1]), decreasing = TRUE), , drop = FALSE]  # sort by magnitude
+nz <- nz[nz[,1] != 0, , drop = FALSE] # keep non-zero
+nz <- nz[order(abs(nz[,1]), decreasing = TRUE), , drop = FALSE] # sort by magnitude
 print(nz)
 
 # Elastic Net
@@ -157,7 +169,7 @@ coef(lasso.model)
 coef(elastic.model)
 # Elastic model select the same predictor as lasso meaning that they are important across models
 # These results suggest that fire seasonality (December and September, etc) 
-# and dryness indicators (DMC) 
+# and dryness indicators (DMC)
 # play key roles in explaining fire area variation
 
 # Cross validation
@@ -186,8 +198,7 @@ print(round(res, 4))
 lasso_resid <- as.numeric(y_test - y_pred)
 par(mfrow = c(1,3))
 
-hist(lasso_resid, breaks = 30,
-     main = "LASSO Residuals (Test)", xlab = "Residual")
+hist(lasso_resid, breaks = 30, main = "LASSO Residuals (Test)", xlab = "Residual")
 
 plot(as.numeric(y_pred), lasso_resid,
      xlab = "Predicted log(1+Area)", ylab = "Residual",
@@ -227,7 +238,7 @@ clf_formula <- as.formula("~ . - area - log_area - target")
 mm_all_clf  <- model.matrix(clf_formula, data = rbind(fire.train, fire.test))
 
 n_tr <- nrow(fire.train)
-x_all_clf   <- mm_all_clf[, -1, drop = FALSE]          # drop intercept
+x_all_clf   <- mm_all_clf[, -1, drop = FALSE] # drop intercept
 x_train_clf <- x_all_clf[1:n_tr, , drop = FALSE]
 x_test_clf  <- x_all_clf[(n_tr + 1):nrow(x_all_clf), , drop = FALSE]
 
