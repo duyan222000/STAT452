@@ -1,288 +1,325 @@
-# install.packages("tidyverse")
-# install.packages("glmnet")
-# install.packages("corrplot")
+# ===============================
+# Forest Fires — Final Script (PNG-only output)
+# ===============================
 
+# ---- Packages ----
+# install.packages(c("tidyverse","glmnet","corrplot","pROC","gridExtra"))
 library(tidyverse)
 library(glmnet)
 library(corrplot)
-library(ggplot2)
-library(tidyr)
-library(dplyr)
 library(pROC)
-
-
-forest <- read.csv("data/ForestFire.csv")
-
-# Relevant data visualizations of features of this dataset
-str(forest)
-summary(forest)
-
-# Check distribution of burned area
-hist(forest$area, breaks = 50, main = "Distribution of Burned Area", xlab = "Area")
-
-# We can see that most are close to zero but some are huge surpassing 1000 area
-# use log_area instead cuz most forest fire are small but some are huge which make it skew
-# toward the right
-forest$log_area <- log1p(forest$area)
-model <- lm(log_area ~ ., data = forest %>% select(-area))
-
-hist(forest$log_area,
-     breaks = 50,
-     main = "Distribution of Burned Area (Log Transformed)",
-     xlab = "log(1 + Area)")
-
-# Cleanup dataset. Are there any outliers ? Are there any missing values in any of the features ?
-# Explain how you handle categorial features in the dataset.
-# Check for missing values
-colSums(is.na(forest))
-
-# remove outliers with cook distance
-# Calculate cook distance
-cooksd <- cooks.distance(model)
-
-cooksd[!is.finite(cooksd)] <- 0
-
-plot(
-  cooksd, type = "h",
-  ylim = c(0, max(cooksd) * 1.1),
-  main = "Cook's Distance for Influential Observations",
-  ylab = "Cook's Distance"
-)
-abline(h = 4 / length(cooksd), col = "red", lty = 2)
-
-# Identify influential points
-threshold <- 4 / length(cooksd)
-influential <- as.numeric(names(cooksd)[(cooksd > threshold)])
-influential <- influential[!is.na(influential)]
-influential
-# Show how many are removed
-cat("Removed:", length(influential), " (",round(100*length(influential)/nrow(forest), 1), "%)\n", sep="")
-
-# Remove influential observations
-forest_clean <- forest[-influential, ]
-
-# Handle categorial features
-# https://www.r-bloggers.com/2022/01/handling-categorical-data-in-r-part-1/
-# We convert it to factor so when needed, R can create dummy tables
-forest_clean$month <- factor(forest_clean$month,
-                             levels = c("jan", "feb", "mar", "apr", "may", "jun",
-                                        "jul", "aug", "sep", "oct", "nov", "dec"))
-
-forest_clean$day <- factor(forest_clean$day,
-                           levels = c("mon", "tue", "wed", "thu", "fri", "sat", "sun"))
-
-str(forest_clean)
-
-num_df <- forest_clean |> select(where(is.numeric))
-corr_mat <- cor(num_df, method = "spearman", use = "pairwise.complete.obs")
-# Correlation heatmap
-corrplot(
-  corr_mat,
-  type = "upper",
-  order = "hclust",
-  tl.cex = 0.6,            # smaller text size
-  tl.col = "black",        # text color
-  tl.srt = 45,             # rotate labels 45 degrees
-  main = "Correlation of Fire-Related Variables (Montesinho Park)",
-  mar = c(0,0,2,0)         # adjust plot margins
-)
-
-# Boxplot of log_area by month
-ggplot(forest_clean, aes(x = month, y = log_area)) + geom_boxplot(outlier.alpha = 0.4) +
-  labs(title = "Burned Area (log scale) by Month in Montesinho Park",
-       x = "Month", y = "log(1+Area)") +
-  theme_minimal(base_size = 12)
-
-# Boxplot of log_area by day of week
-ggplot(forest_clean, aes(x = day, y = log_area)) +
-  geom_boxplot(outlier.alpha = 0.4) +
-  labs(title = "Burned Area (log scale) by Day of Week in Montesinho Park",
-       x = "Day of Week", y = "log(1+Area)") +
-  theme_minimal(base_size = 12)
-
-# Boxplots for numeric predictors
-forest_clean |>
-  select(where(is.numeric), -area) |>
-  pivot_longer(cols = everything()) |>
-  ggplot(aes(x = name, y = value)) +
-  geom_boxplot(outlier.alpha = 0.3) +
-  coord_flip() +
-  labs(title = "Distribution of Fire-Related Predictors (Montesinho Park)",
-       x = "Variables", y = "Value") +
-  theme_minimal(base_size = 12)
-
-# Apply appropriate transformations of the features and/or output.
-trainTestSplit = function(data, seed, trainRatio = 0.8){
-  set.seed(seed)
-  dataSize = nrow(data)
-  trainSize = round(trainRatio * dataSize)
-  trainIndex = sample(1:dataSize, replace = FALSE, size = trainSize)
-  
-  trainData = data[trainIndex,]
-  testData = data[-trainIndex,]
-  return(list(train = trainData, test = testData))
-}
-fire.split = trainTestSplit(forest_clean, 0, trainRatio = 0.8)
-fire.train = fire.split$train
-fire.test = fire.split$test
-
-mm_formula <- as.formula("~ . - area")  # exclude raw area (use log_area instead)
-mm_all <- model.matrix(mm_formula, data = rbind(fire.train, fire.test))
-
-n_tr <- nrow(fire.train)
-x_all   <- mm_all[, -1, drop = FALSE]      # drop intercept column
-x_train <- x_all[1:n_tr, , drop = FALSE]
-x_test  <- x_all[(n_tr + 1):nrow(x_all), , drop = FALSE]
-
-y_train <- fire.train$log_area
-y_test  <- fire.test$log_area
-# Use appropriate feature selection methods. Explain how you setup Ridge/Lasso/Elastic net 
-# regularization method and interpret the result.
+library(gridExtra)
+library(grid)
 
 set.seed(123)
+dir.create("plots", showWarnings = FALSE)
 
-# Ridge Regression=
-cv.ridge <- cv.glmnet(x_train, y_train, alpha = 0)
-ridge.model <- glmnet(x_train, y_train, lambda = cv.ridge$lambda.min, alpha = 0)
-plot(cv.ridge);   title("Ridge CV",   line = 2.5)
+# ---- Unified PNG savers ----
+save_png <- function(file, width=1600, height=1100, res=220, plot_expr){
+  png(file, width=width, height=height, res=res)
+  on.exit(dev.off(), add = TRUE)
+  eval.parent(substitute(plot_expr))
+}
+png_table <- function(df, file, width=1200, height=600, res=220, rows=NULL){
+  tbl <- gridExtra::tableGrob(df, rows = rows)
+  png(file, width=width, height=height, res=res); grid::grid.draw(tbl); dev.off()
+}
+save_table_png <- function(df, file, caption=NULL, width=1200, height=600, res=220){
+  if (!is.null(caption)) {
+    df <- rbind(setNames(as.list(rep("", ncol(df))), names(df)), df)
+    grob_cap <- textGrob(caption, gp=gpar(fontface="bold", cex=1.1))
+    tbl <- tableGrob(df)
+    lay <- rbind(c(1), c(2))
+    g <- gtable:::gtable_add_rows(tbl, heights=grobHeight(grob_cap) + unit(4,"pt"), pos=0)
+    g <- gtable:::gtable_add_grob(g, grob_cap, 1, 1, 1, ncol(tbl))
+    png(file, width=width, height=height, res=res); grid::grid.draw(g); dev.off()
+  } else {
+    png_table(df, file, width, height, res)
+  }
+}
 
-# Lasso Regression
-cv.lasso <- cv.glmnet(x_train, y_train, alpha = 1, standardize = TRUE)
-lasso.model <- glmnet(x_train, y_train, lambda = cv.lasso$lambda.min, alpha = 1)
-plot(cv.lasso);   title("LASSO CV", line = 2.5)
-
-nz <- as.matrix(coef(lasso.model))
-nz <- nz[nz[,1] != 0, , drop = FALSE] # keep non-zero
-nz <- nz[order(abs(nz[,1]), decreasing = TRUE), , drop = FALSE] # sort by magnitude
-print(nz)
-
-# Elastic Net
-cv.elastic <- cv.glmnet(x_train, y_train, alpha = 0.5)
-elastic.model <- glmnet(x_train, y_train, lambda = cv.elastic$lambda.min, alpha = 0.5)
-plot(cv.elastic); title("Elastic Net CV", line = 2.5)
-
-# Coefficients from best models
-coef(ridge.model)
-coef(lasso.model)
-# Certain months like September, december have high influence on the burned area
-# The DMC value and temp are also picked through the lasso model
-coef(elastic.model)
-# Elastic model select the same predictor as lasso meaning that they are important across models
-# These results suggest that fire seasonality (December and September, etc) 
-# and dryness indicators (DMC)
-# play key roles in explaining fire area variation
-
-# Cross validation
-# Prepare test data
-
-# Predictions
-y_pred <- predict(lasso.model, s = cv.lasso$lambda.min, newx = x_test)
-
-pred_ridge  <- predict(ridge.model,  newx = x_test, s = cv.ridge$lambda.min)
-pred_elastic<- predict(elastic.model,newx = x_test, s = cv.elastic$lambda.min)
-
-metrics <- function(y, yhat){
+# ---- Helpers ----
+metrics_reg <- function(y, yhat){
   rmse <- sqrt(mean((y - yhat)^2))
   mae  <- mean(abs(y - yhat))
   r2   <- 1 - sum((y - yhat)^2)/sum((y - mean(y))^2)
   c(RMSE=rmse, MAE=mae, R2=r2)
 }
-res <- rbind(
-  LASSO   = metrics(y_test, as.numeric(y_pred)),
-  RIDGE   = metrics(y_test, as.numeric(pred_ridge)),
-  ELASTIC = metrics(y_test, as.numeric(pred_elastic))
-)
-print(round(res, 4))
+trainTestSplit <- function(data, seed=0, trainRatio=.8){
+  set.seed(seed); n <- nrow(data)
+  tr <- sample(seq_len(n), size = round(trainRatio*n), replace = FALSE)
+  list(train=data[tr,,drop=FALSE], test=data[-tr,,drop=FALSE])
+}
+stratified_split <- function(df, y="target", train_ratio=.8, seed=123){
+  set.seed(seed)
+  i1 <- which(df[[y]]==1); i0 <- which(df[[y]]==0)
+  n1 <- round(train_ratio*length(i1)); n0 <- round(train_ratio*length(i0))
+  tr_idx <- c(sample(i1, n1), sample(i0, n0))
+  te_idx <- setdiff(seq_len(nrow(df)), tr_idx)
+  list(train=df[tr_idx,,drop=FALSE], test=df[te_idx,,drop=FALSE])
+}
+iqr_trim_mask <- function(df_num){
+  trims <- lapply(df_num, function(x){
+    q1 <- quantile(x, .25, na.rm=TRUE); q3 <- quantile(x, .75, na.rm=TRUE)
+    i  <- IQR(x, na.rm=TRUE); lo <- q1 - 1.5*i; hi <- q3 + 1.5*i
+    x >= lo & x <= hi
+  })
+  Reduce(`&`, trims)
+}
 
-# --- Residual diagnostics for LASSO on the test set ---
-lasso_resid <- as.numeric(y_test - y_pred)
-par(mfrow = c(1,3))
+# ---- Load & basic transforms ----
+forest <- read.csv("data/ForestFire.csv", stringsAsFactors = FALSE)
 
-hist(lasso_resid, breaks = 30, main = "LASSO Residuals (Test)", xlab = "Residual")
+forest <- forest %>%
+  mutate(
+    log_area = log1p(area),
+    month = factor(month, levels = c("jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec")),
+    day   = factor(day,   levels = c("mon","tue","wed","thu","fri","sat","sun")),
+    target = as.integer(area > 0)
+  )
 
-plot(as.numeric(y_pred), lasso_resid,
-     xlab = "Predicted log(1+Area)", ylab = "Residual",
-     main = "Residuals vs Predicted")
-abline(h = 0, col = "red", lty = 2)
+# Missingness
+na_counts <- colSums(is.na(forest))
+save_table_png(as.data.frame(na_counts) |> rownames_to_column("Column"),
+               "plots/table_missing_values.png", "Missing values per column")
 
-qqnorm(lasso_resid, main = "Q–Q Plot of Residuals")
-qqline(lasso_resid, col = "red")
+# ---- EDA (all saved via PNG) ----
+p_hist_raw <- ggplot(forest, aes(area)) +
+  geom_histogram(bins=50, fill="#4C78A8") +
+  labs(title="Distribution of Burned Area (raw)", x="Area (ha)", y="Count") +
+  theme_minimal(base_size=13)
+save_png("plots/fig_hist_area_raw.png", plot_expr = { print(p_hist_raw) })
 
-par(mfrow = c(1,1))
+p_hist_log <- ggplot(forest, aes(log_area)) +
+  geom_histogram(bins=50, fill="#72B7B2") +
+  labs(title="Distribution of Burned Area (log scale)", x="log(1 + Area)", y="Count") +
+  theme_minimal(base_size=13)
+save_png("plots/fig_hist_area_log.png", plot_expr = { print(p_hist_log) })
 
-# Evaluation
-rmse <- sqrt(mean((y_test - y_pred)^2))
-mae <- mean(abs(y_test - y_pred))
-r2 <- 1 - sum((y_test - y_pred)^2) / sum((y_test - mean(y_test))^2)
+p_box_month <- ggplot(forest, aes(month, log_area)) +
+  geom_boxplot(outlier.alpha=.45, fill="#E45756") +
+  labs(title="Burned Area (log) by Month", x="Month", y="log(1+Area)") +
+  theme_minimal(base_size=13)
+save_png("plots/fig_box_month.png", plot_expr = { print(p_box_month) })
 
-cat("RMSE:", rmse, "\n")
-cat("MAE:", mae, "\n")
-cat("R²:", r2, "\n")
+p_box_day <- ggplot(forest, aes(day, log_area)) +
+  geom_boxplot(outlier.alpha=.45, fill="#F1A208") +
+  labs(title="Burned Area (log) by Day of Week", x="Day of Week", y="log(1+Area)") +
+  theme_minimal(base_size=13)
+save_png("plots/fig_box_day.png", plot_expr = { print(p_box_day) })
 
-# Classification task
-# We should use Recall score as classification metric because:
-# we want to focus on avoiding false negative cases when we predict that 
-# there is no fire but a fire occur
-# === CLASSIFICATION (fixed: exclude 'target' from predictors) ===
-
-# Ensure target exists (0/1)
-forest_clean$target <- ifelse(forest_clean$area > 0, 1, 0)
-
-# Split
-fire.split <- trainTestSplit(forest_clean, seed = 0, trainRatio = 0.8)
-fire.train <- fire.split$train
-fire.test  <- fire.split$test
-
-# Build aligned design matrices; EXCLUDE area, log_area, AND target
-clf_formula <- as.formula("~ . - area - log_area - target")
-mm_all_clf  <- model.matrix(clf_formula, data = rbind(fire.train, fire.test))
-
-n_tr <- nrow(fire.train)
-x_all_clf   <- mm_all_clf[, -1, drop = FALSE] # drop intercept
-x_train_clf <- x_all_clf[1:n_tr, , drop = FALSE]
-x_test_clf  <- x_all_clf[(n_tr + 1):nrow(x_all_clf), , drop = FALSE]
-
-y_train_clf <- fire.train$target
-y_test_clf  <- fire.test$target
-
-# Fit logistic regression
-set.seed(123)
-train_df_for_glm <- data.frame(target = y_train_clf, x_train_clf)
-test_df_for_glm  <- data.frame(x_test_clf)
-
-fire.logit <- glm(target ~ ., data = train_df_for_glm, family = "binomial")
-summary(fire.logit)
-
-# Predict + metrics
-test_prob  <- predict(fire.logit, newdata = test_df_for_glm, type = "response")
-test_label <- ifelse(test_prob > 0.5, 1, 0)
-
-TP <- sum((test_label == 1) & (y_test_clf == 1))
-FP <- sum((test_label == 1) & (y_test_clf == 0))
-FN <- sum((test_label == 0) & (y_test_clf == 1))
-TN <- sum((test_label == 0) & (y_test_clf == 0))
-
-recall    <- TP / (TP + FN)
-precision <- ifelse((TP + FP) == 0, NA, TP / (TP + FP))
-f1        <- ifelse(is.na(precision) || (precision + recall) == 0, NA, 2*precision*recall/(precision+recall))
-cat(sprintf("Recall: %.3f   Precision: %.3f   F1: %.3f\n", recall, precision, f1))
-
-# --- Confusion matrix at the default 0.5 threshold ---
-cm <- table(Pred = test_label, True = y_test_clf)
-print(cm)
-
-# --- Threshold vs Recall curve ---
-th <- seq(0, 1, by = 0.01)
-rec_curve <- sapply(th, function(t) {
-  mean((test_prob >= t) & (y_test_clf == 1)) / mean(y_test_clf == 1)
+# Correlation heatmap (numeric)
+num_df <- forest |> select(where(is.numeric))
+corr_mat <- cor(num_df, method="spearman", use="pairwise.complete.obs")
+save_png("plots/fig_corr_heatmap.png", width=2000, height=1600, plot_expr = {
+  corrplot(corr_mat, type="upper", order="hclust",
+           tl.cex=.7, tl.col="black", tl.srt=45,
+           mar=c(0,0,2,0), main="Spearman Correlations")
 })
-plot(th, rec_curve, type = "l",
-     main = "Recall vs Threshold (Fire Occurrence Prediction)",
-     xlab = "Classification Threshold", ylab = "Recall")
 
-roc_obj <- roc(response = y_test_clf, predictor = as.numeric(test_prob))
-auc_val <- auc(roc_obj)
-cat(sprintf("AUC: %.3f\n", auc_val))
+# ---- IQR outlier cleaning + before/after boxplots ----
+num_cols <- names(select(forest, where(is.numeric)))
+mask <- iqr_trim_mask(forest[num_cols])
+forest_iqr <- forest[mask, , drop=FALSE]
+removed_iqr <- nrow(forest) - nrow(forest_iqr)
+save_table_png(data.frame(Removed_IQR = removed_iqr,
+                          Kept = nrow(forest_iqr),
+                          Total = nrow(forest)),
+               "plots/table_iqr_removed.png", "IQR trim — row counts")
 
-plot(roc_obj, col = "blue", lwd = 2, main = "ROC Curve for Logistic Regression")
-abline(a = 0, b = 1, lty = 2, col = "red")  # diagonal reference
+# Drop 'rain' if constant post-clean
+if ("rain" %in% names(forest_iqr) && length(unique(forest_iqr$rain)) <= 1L) {
+  forest_iqr$rain <- NULL
+}
+
+p_before <- forest %>% select(where(is.numeric)) %>% pivot_longer(everything()) %>%
+  ggplot(aes(name, value)) + geom_boxplot(outlier.alpha=.25) + coord_flip() +
+  labs(title="Numeric variables BEFORE IQR cleaning", x=NULL, y=NULL) + theme_minimal(12)
+save_png("plots/fig_box_before_iqr.png", width=1400, height=1200, plot_expr = { print(p_before) })
+
+p_after <- forest_iqr %>% select(where(is.numeric)) %>% pivot_longer(everything()) %>%
+  ggplot(aes(name, value)) + geom_boxplot(outlier.alpha=.25) + coord_flip() +
+  labs(title="Numeric variables AFTER IQR cleaning", x=NULL, y=NULL) + theme_minimal(12)
+save_png("plots/fig_box_after_iqr.png", width=1400, height=1200, plot_expr = { print(p_after) })
+
+# ---- Cook's distance based on a sensible baseline model ----
+rhs <- intersect(c("X","Y","month","day","FFMC","DMC","DC","ISI","temp","RH","wind","rain"),
+                 names(forest_iqr))
+fml <- reformulate(rhs, response = "log_area")
+lm0 <- lm(fml, data = forest_iqr)
+cooks <- cooks.distance(lm0); cooks[!is.finite(cooks)] <- NA_real_
+thr <- 4/length(cooks)
+save_png("plots/fig_cooks.png", width=1600, height=900, plot_expr = {
+  ymax <- max(cooks, na.rm=TRUE); if(!is.finite(ymax)) ymax <- 1
+  plot(cooks, type="h", ylim=c(0, 1.08*ymax),
+       main="Cook's Distance for Influential Observations",
+       ylab="Cook's Distance", xlab="Index")
+  abline(h=thr, col="red", lty=2)
+})
+infl <- which(is.finite(cooks) & cooks > thr)
+forest_final <- if (length(infl)) forest_iqr[-infl,,drop=FALSE] else forest_iqr
+save_table_png(data.frame(Cooks_Removed = length(infl)), "plots/table_cooks_removed.png",
+               "Cook's distance — removed rows")
+
+# ==========================
+# REGRESSION (glmnet)
+# ==========================
+split_r <- trainTestSplit(forest_final, seed = 0, trainRatio = .8)
+tr_r <- split_r$train; te_r <- split_r$test
+
+mm_reg <- model.matrix(~ . - area - log_area - target, data = rbind(tr_r, te_r))
+ntr <- nrow(tr_r)
+x_tr <- mm_reg[1:ntr, -1, drop=FALSE]
+x_te <- mm_reg[(ntr+1):nrow(mm_reg), -1, drop=FALSE]
+y_tr <- tr_r$log_area
+y_te <- te_r$log_area
+
+set.seed(123)
+cv.ridge <- cv.glmnet(x_tr, y_tr, alpha=0,   standardize=TRUE)
+cv.lasso <- cv.glmnet(x_tr, y_tr, alpha=1,   standardize=TRUE)
+alpha_grid <- seq(0.1, 0.9, by=.2)
+cv_list <- lapply(alpha_grid, function(a) cv.glmnet(x_tr, y_tr, alpha=a, standardize=TRUE))
+best_en_idx <- which.min(sapply(cv_list, function(cv) min(cv$cvm)))
+best_alpha <- alpha_grid[best_en_idx]; cv.elastic <- cv_list[[best_en_idx]]
+
+ridge.model   <- glmnet(x_tr, y_tr, alpha=0,          lambda=cv.ridge$lambda.min,   standardize=TRUE)
+lasso.model   <- glmnet(x_tr, y_tr, alpha=1,          lambda=cv.lasso$lambda.min,   standardize=TRUE)
+elastic.model <- glmnet(x_tr, y_tr, alpha=best_alpha, lambda=cv.elastic$lambda.min, standardize=TRUE)
+
+save_png("plots/fig_cv_ridge.png", 1400, 1000, plot_expr = { plot(cv.ridge);  title("Ridge CV",   line=2.5) })
+save_png("plots/fig_cv_lasso.png", 1400, 1000, plot_expr = { plot(cv.lasso);  title("LASSO CV",   line=2.5) })
+save_png("plots/fig_cv_elnet.png", 1400, 1000, plot_expr = { plot(cv.elastic); title(paste0("Elastic Net CV (alpha=",best_alpha,")"), line=2.5) })
+
+pred_ridge   <- as.numeric(predict(ridge.model,   newx=x_te))
+pred_lasso   <- as.numeric(predict(lasso.model,   newx=x_te))
+pred_elastic <- as.numeric(predict(elastic.model, newx=x_te))
+
+res_tbl <- rbind(
+  LASSO   = metrics_reg(y_te, pred_lasso),
+  RIDGE   = metrics_reg(y_te, pred_ridge),
+  ELASTIC = metrics_reg(y_te, pred_elastic)
+) %>% as.data.frame() %>% rownames_to_column("Model") %>% mutate(across(-Model, ~round(.,4)))
+save_table_png(res_tbl, "plots/table_regression_metrics.png", "Predictive performance (test set)")
+
+# --- Residual diagnostics for LASSO (exactly as requested) ---
+lasso_resid <- y_te - pred_lasso
+ok <- is.finite(lasso_resid) & is.finite(pred_lasso)
+save_png("plots/fig_residuals_lasso.png", width=1800, height=600, plot_expr = {
+  par(mfrow=c(1,3))
+  if (any(ok)) {
+    hist(lasso_resid[ok], breaks=30, main="LASSO Residuals (Test)", xlab="Residual")
+    plot(pred_lasso[ok], lasso_resid[ok], xlab="Predicted log(1+Area)", ylab="Residual",
+         main="Residuals vs Predicted"); abline(h=0, col="red", lty=2)
+    qqnorm(lasso_resid[ok], main="Q–Q Plot of Residuals"); qqline(lasso_resid[ok], col="red")
+  } else {
+    plot.new(); title("No finite residuals"); plot.new(); title("No finite residuals"); plot.new(); title("No finite residuals")
+  }
+  par(mfrow=c(1,1))
+})
+
+# ==========================
+# CLASSIFICATION (glmnet)
+# ==========================
+forest_final$target <- as.integer(forest_final$area > 0)
+split_c <- stratified_split(forest_final, y="target", train_ratio=.8, seed=123)
+tr_c <- split_c$train; te_c <- split_c$test
+
+mm_clf <- model.matrix(~ . - area - log_area - target, data = rbind(tr_c, te_c))
+ntrc <- nrow(tr_c)
+x_tr_c <- mm_clf[1:ntrc, -1, drop=FALSE]
+x_te_c <- mm_clf[(ntrc+1):nrow(mm_clf), -1, drop=FALSE]
+y_tr_c <- tr_c$target; y_te_c <- te_c$target
+
+# class weights (prioritize recall)
+w <- ifelse(y_tr_c==1, 1, sum(y_tr_c==1)/sum(y_tr_c==0))
+set.seed(123)
+cv.logit <- cv.glmnet(x_tr_c, y_tr_c, family="binomial", weights=w, standardize=TRUE)
+logit    <- glmnet(x_tr_c, y_tr_c, family="binomial", lambda=cv.logit$lambda.min, standardize=TRUE)
+
+prob <- as.numeric(predict(logit, newx=x_te_c, type="response"))
+
+# Recall vs threshold
+th <- seq(0,1,by=.01)
+rec <- sapply(th, function(t){
+  lab <- as.integer(prob >= t)
+  TP <- sum(lab==1 & y_te_c==1); FN <- sum(lab==0 & y_te_c==1)
+  ifelse(TP+FN==0, NA, TP/(TP+FN))
+})
+best_rec_th <- th[ which.max(replace(rec, is.na(rec), -Inf)) ]
+
+df_rec <- tibble(threshold = th, recall = rec)
+p_rec <- ggplot(df_rec, aes(threshold, recall)) +
+  geom_line(linewidth=1) +
+  geom_vline(xintercept = best_rec_th, linetype=2, colour="red") +
+  labs(title="Recall vs Threshold (Fire Occurrence)", x="Threshold", y="Recall") +
+  theme_minimal(base_size=13)
+save_png("plots/fig_recall_threshold.png", 1200, 800, plot_expr = { print(p_rec) })
+
+# ROC + AUC
+roc_obj <- pROC::roc(response=y_te_c, predictor=prob, na.rm=TRUE)
+auc_val <- as.numeric(pROC::auc(roc_obj))
+save_png("plots/fig_roc.png", width=900, height=800, plot_expr = {
+  plot(roc_obj, col="blue", lwd=2, main=paste0("ROC (AUC = ", round(auc_val,3), ")"))
+  abline(a=0, b=1, lty=2, col="red")
+})
+
+# Confusion matrices + metrics at t=0.50, Max Recall, Best F1
+f1_at <- function(r,p){ ifelse(is.na(p) || (p+r)==0, NA, 2*p*r/(p+r)) }
+cm_metrics <- function(prob, y_true, thr){
+  pred <- as.integer(prob >= thr)
+  TP <- sum(pred==1 & y_true==1); FP <- sum(pred==1 & y_true==0)
+  FN <- sum(pred==0 & y_true==1); TN <- sum(pred==0 & y_true==0)
+  Recall <- TP/(TP+FN)
+  Precision <- ifelse((TP+FP)==0, NA, TP/(TP+FP))
+  F1 <- f1_at(Recall, Precision)
+  list(TP=TP, FP=FP, FN=FN, TN=TN, Recall=Recall, Precision=Precision, F1=F1)
+}
+
+# Best-F1 threshold search
+pre <- sapply(th, function(t){
+  lab <- as.integer(prob >= t); TP <- sum(lab==1 & y_te_c==1); FP <- sum(lab==1 & y_te_c==0)
+  ifelse((TP+FP)==0, NA, TP/(TP+FP))
+})
+f1 <- mapply(f1_at, rec, pre)
+best_f1_th <- th[ which.max(replace(f1, is.na(f1), -Inf)) ]
+
+m05 <- cm_metrics(prob, y_te_c, 0.50)
+mBR <- cm_metrics(prob, y_te_c, best_rec_th)
+mBF <- cm_metrics(prob, y_te_c, best_f1_th)
+
+metrics_df <- tibble(
+  Setting   = c("t=0.50 (default)", sprintf("t=%.2f (Max Recall)",best_rec_th), sprintf("t=%.2f (Best F1)",best_f1_th)),
+  Threshold = c(0.50, best_rec_th, best_f1_th),
+  Recall    = round(c(m05$Recall, mBR$Recall, mBF$Recall), 3),
+  Precision = round(c(m05$Precision, mBR$Precision, mBF$Precision), 3),
+  F1        = round(c(m05$F1, mBR$F1, mBF$F1), 3),
+  AUC       = round(auc_val, 3)
+)
+save_table_png(metrics_df, "plots/table_classification_metrics.png", "Classification metrics (test set)")
+
+cm_to_df <- function(stat){
+  data.frame(`Pred \\ True`=c("0","1"),
+             `0`=c(stat$TN, stat$FP),
+             `1`=c(stat$FN, stat$TP))
+}
+save_table_png(cm_to_df(m05), "plots/table_confusion_matrix_t05.png", caption="Confusion Matrix (t=0.50)")
+save_table_png(cm_to_df(mBR), "plots/table_confusion_matrix_maxRecall.png",
+               caption=sprintf("Confusion Matrix (t=%.2f, Max Recall)", best_rec_th))
+save_table_png(cm_to_df(mBF), "plots/table_confusion_matrix_bestF1.png",
+               caption=sprintf("Confusion Matrix (t=%.2f, Best F1)", best_f1_th))
+
+# ---- Done ----
+message(
+  "Saved to 'plots/':\n",
+  "- fig_hist_area_raw.png, fig_hist_area_log.png\n",
+  "- fig_box_month.png, fig_box_day.png\n",
+  "- fig_corr_heatmap.png\n",
+  "- table_missing_values.png, table_iqr_removed.png, table_cooks_removed.png\n",
+  "- fig_box_before_iqr.png, fig_box_after_iqr.png\n",
+  "- fig_cooks.png\n",
+  "- fig_cv_ridge.png, fig_cv_lasso.png, fig_cv_elnet.png\n",
+  "- table_regression_metrics.png, fig_residuals_lasso.png\n",
+  "- fig_recall_threshold.png, fig_roc.png\n",
+  "- table_classification_metrics.png\n",
+  "- table_confusion_matrix_t05.png, table_confusion_matrix_maxRecall.png, table_confusion_matrix_bestF1.png\n"
+)
