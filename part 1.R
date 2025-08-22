@@ -1,8 +1,4 @@
-# ===============================
-# Forest Fires — Final Script (PNG-only output)
-# ===============================
-
-# ---- Packages ----
+# Packages
 # install.packages(c("tidyverse","glmnet","corrplot","pROC","gridExtra"))
 library(tidyverse)
 library(glmnet)
@@ -14,7 +10,7 @@ library(grid)
 set.seed(123)
 dir.create("plots", showWarnings = FALSE)
 
-# ---- Unified PNG savers ----
+# Unified PNG savers
 save_png <- function(file, width=1600, height=1100, res=220, plot_expr){
   png(file, width=width, height=height, res=res)
   on.exit(dev.off(), add = TRUE)
@@ -38,7 +34,7 @@ save_table_png <- function(df, file, caption=NULL, width=1200, height=600, res=2
   }
 }
 
-# ---- Helpers ----
+# Helpers
 metrics_reg <- function(y, yhat){
   rmse <- sqrt(mean((y - yhat)^2))
   mae  <- mean(abs(y - yhat))
@@ -67,7 +63,7 @@ iqr_trim_mask <- function(df_num){
   Reduce(`&`, trims)
 }
 
-# ---- Load & basic transforms ----
+# Load & basic transforms
 forest <- read.csv("data/ForestFire.csv", stringsAsFactors = FALSE)
 
 forest <- forest %>%
@@ -83,7 +79,7 @@ na_counts <- colSums(is.na(forest))
 save_table_png(as.data.frame(na_counts) |> rownames_to_column("Column"),
                "plots/table_missing_values.png", "Missing values per column")
 
-# ---- EDA (all saved via PNG) ----
+# EDA
 p_hist_raw <- ggplot(forest, aes(area)) +
   geom_histogram(bins=50, fill="#4C78A8") +
   labs(title="Distribution of Burned Area (raw)", x="Area (ha)", y="Count") +
@@ -108,7 +104,7 @@ p_box_day <- ggplot(forest, aes(day, log_area)) +
   theme_minimal(base_size=13)
 save_png("plots/fig_box_day.png", plot_expr = { print(p_box_day) })
 
-# Correlation heatmap (numeric)
+# Correlation heatmap
 num_df <- forest |> select(where(is.numeric))
 corr_mat <- cor(num_df, method="spearman", use="pairwise.complete.obs")
 save_png("plots/fig_corr_heatmap.png", width=2000, height=1600, plot_expr = {
@@ -117,7 +113,7 @@ save_png("plots/fig_corr_heatmap.png", width=2000, height=1600, plot_expr = {
            mar=c(0,0,2,0), main="Spearman Correlations")
 })
 
-# ---- IQR outlier cleaning + before/after boxplots ----
+# IQR outlier cleaning + before/after boxplots
 num_cols <- names(select(forest, where(is.numeric)))
 mask <- iqr_trim_mask(forest[num_cols])
 forest_iqr <- forest[mask, , drop=FALSE]
@@ -142,7 +138,7 @@ p_after <- forest_iqr %>% select(where(is.numeric)) %>% pivot_longer(everything(
   labs(title="Numeric variables AFTER IQR cleaning", x=NULL, y=NULL) + theme_minimal(12)
 save_png("plots/fig_box_after_iqr.png", width=1400, height=1200, plot_expr = { print(p_after) })
 
-# ---- Cook's distance based on a sensible baseline model ----
+# Cook's distance based on a sensible baseline model
 rhs <- intersect(c("X","Y","month","day","FFMC","DMC","DC","ISI","temp","RH","wind","rain"),
                  names(forest_iqr))
 fml <- reformulate(rhs, response = "log_area")
@@ -161,9 +157,7 @@ forest_final <- if (length(infl)) forest_iqr[-infl,,drop=FALSE] else forest_iqr
 save_table_png(data.frame(Cooks_Removed = length(infl)), "plots/table_cooks_removed.png",
                "Cook's distance — removed rows")
 
-# ==========================
 # REGRESSION (glmnet)
-# ==========================
 split_r <- trainTestSplit(forest_final, seed = 0, trainRatio = .8)
 tr_r <- split_r$train; te_r <- split_r$test
 
@@ -201,7 +195,7 @@ res_tbl <- rbind(
 ) %>% as.data.frame() %>% rownames_to_column("Model") %>% mutate(across(-Model, ~round(.,4)))
 save_table_png(res_tbl, "plots/table_regression_metrics.png", "Predictive performance (test set)")
 
-# --- Residual diagnostics for LASSO (exactly as requested) ---
+# Residual diagnostics for LASSO
 lasso_resid <- y_te - pred_lasso
 ok <- is.finite(lasso_resid) & is.finite(pred_lasso)
 save_png("plots/fig_residuals_lasso.png", width=1800, height=600, plot_expr = {
@@ -217,9 +211,7 @@ save_png("plots/fig_residuals_lasso.png", width=1800, height=600, plot_expr = {
   par(mfrow=c(1,1))
 })
 
-# ==========================
 # CLASSIFICATION (glmnet)
-# ==========================
 forest_final$target <- as.integer(forest_final$area > 0)
 split_c <- stratified_split(forest_final, y="target", train_ratio=.8, seed=123)
 tr_c <- split_c$train; te_c <- split_c$test
@@ -308,7 +300,6 @@ save_table_png(cm_to_df(mBR), "plots/table_confusion_matrix_maxRecall.png",
 save_table_png(cm_to_df(mBF), "plots/table_confusion_matrix_bestF1.png",
                caption=sprintf("Confusion Matrix (t=%.2f, Best F1)", best_f1_th))
 
-# ---- Done ----
 message(
   "Saved to 'plots/':\n",
   "- fig_hist_area_raw.png, fig_hist_area_log.png\n",
