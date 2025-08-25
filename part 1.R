@@ -133,11 +133,6 @@ p_before <- forest %>% select(where(is.numeric)) %>% pivot_longer(everything()) 
   labs(title="Numeric variables BEFORE IQR cleaning", x=NULL, y=NULL) + theme_minimal(12)
 save_png("plots/fig_box_before_iqr.png", width=1400, height=1200, plot_expr = { print(p_before) })
 
-p_after <- forest_iqr %>% select(where(is.numeric)) %>% pivot_longer(everything()) %>%
-  ggplot(aes(name, value)) + geom_boxplot(outlier.alpha=.25) + coord_flip() +
-  labs(title="Numeric variables AFTER IQR cleaning", x=NULL, y=NULL) + theme_minimal(12)
-save_png("plots/fig_box_after_iqr.png", width=1400, height=1200, plot_expr = { print(p_after) })
-
 # Cook's distance based on a sensible baseline model
 rhs <- intersect(c("X","Y","month","day","FFMC","DMC","DC","ISI","temp","RH","wind","rain"),
                  names(forest_iqr))
@@ -156,6 +151,11 @@ infl <- which(is.finite(cooks) & cooks > thr)
 forest_final <- if (length(infl)) forest_iqr[-infl,,drop=FALSE] else forest_iqr
 save_table_png(data.frame(Cooks_Removed = length(infl)), "plots/table_cooks_removed.png",
                "Cook's distance — removed rows")
+
+p_after <- forest_final %>% select(where(is.numeric)) %>% pivot_longer(everything()) %>%
+  ggplot(aes(name, value)) + geom_boxplot(outlier.alpha=.25) + coord_flip() +
+  labs(title="Numeric variables AFTER cleaning", x=NULL, y=NULL) + theme_minimal(12)
+save_png("plots/fig_box_after_iqr_and_cook's_distance.png", width=1400, height=1200, plot_expr = { print(p_after) })
 
 # REGRESSION (glmnet)
 split_r <- trainTestSplit(forest_final, seed = 0, trainRatio = .8)
@@ -213,8 +213,9 @@ save_png("plots/fig_residuals_lasso.png", width=1800, height=600, plot_expr = {
 
 # CLASSIFICATION (glmnet)
 forest_final$target <- as.integer(forest_final$area > 0)
-split_c <- stratified_split(forest_final, y="target", train_ratio=.8, seed=123)
-tr_c <- split_c$train; te_c <- split_c$test
+split_c <- stratified_split(forest_final, y="target", train_ratio=.8, seed=1111)
+tr_c <- split_c$train; 
+te_c <- split_c$test
 
 mm_clf <- model.matrix(~ . - area - log_area - target, data = rbind(tr_c, te_c))
 ntrc <- nrow(tr_c)
@@ -223,10 +224,12 @@ x_te_c <- mm_clf[(ntrc+1):nrow(mm_clf), -1, drop=FALSE]
 y_tr_c <- tr_c$target; y_te_c <- te_c$target
 
 # class weights (prioritize recall)
-w <- ifelse(y_tr_c==1, 1, sum(y_tr_c==1)/sum(y_tr_c==0))
-set.seed(123)
+weight_ratio <- sum(y_tr_c == 0) / sum(y_tr_c == 1)
+w <- ifelse(y_tr_c == 1, weight_ratio, 1)
+
+set.seed(1)
 cv.logit <- cv.glmnet(x_tr_c, y_tr_c, family="binomial", weights=w, standardize=TRUE)
-logit    <- glmnet(x_tr_c, y_tr_c, family="binomial", lambda=cv.logit$lambda.min, standardize=TRUE)
+logit    <- glmnet(x_tr_c, y_tr_c, family="binomial", weights=w, lambda=cv.logit$lambda.min, standardize=TRUE)
 
 prob <- as.numeric(predict(logit, newx=x_te_c, type="response"))
 
@@ -278,13 +281,14 @@ best_f1_th <- th[ which.max(replace(f1, is.na(f1), -Inf)) ]
 m05 <- cm_metrics(prob, y_te_c, 0.50)
 mBR <- cm_metrics(prob, y_te_c, best_rec_th)
 mBF <- cm_metrics(prob, y_te_c, best_f1_th)
+m04 <- cm_metrics(prob, y_te_c, 0.45)
 
 metrics_df <- tibble(
-  Setting   = c("t=0.50 (default)", sprintf("t=%.2f (Max Recall)",best_rec_th), sprintf("t=%.2f (Best F1)",best_f1_th)),
-  Threshold = c(0.50, best_rec_th, best_f1_th),
-  Recall    = round(c(m05$Recall, mBR$Recall, mBF$Recall), 3),
-  Precision = round(c(m05$Precision, mBR$Precision, mBF$Precision), 3),
-  F1        = round(c(m05$F1, mBR$F1, mBF$F1), 3),
+  Setting   = c("t=0.50 (default)", "t=0.45", sprintf("t=%.2f (Max Recall)",best_rec_th), sprintf("t=%.2f (Best F1)",best_f1_th)),
+  Threshold = c(0.50, 0.45, best_rec_th, best_f1_th),
+  Recall    = round(c(m05$Recall, m04$Recall, mBR$Recall, mBF$Recall), 3),
+  Precision = round(c(m05$Precision, m04$Precision, mBR$Precision, mBF$Precision), 3),
+  F1        = round(c(m05$F1, m04$F1, mBR$F1, mBF$F1), 3),
   AUC       = round(auc_val, 3)
 )
 save_table_png(metrics_df, "plots/table_classification_metrics.png", "Classification metrics (test set)")
@@ -295,6 +299,7 @@ cm_to_df <- function(stat){
              `1`=c(stat$FN, stat$TP))
 }
 save_table_png(cm_to_df(m05), "plots/table_confusion_matrix_t05.png", caption="Confusion Matrix (t=0.50)")
+save_table_png(cm_to_df(m04), "plots/table_confusion_matrix_t045.png", caption="Confusion Matrix (t=0.45)")
 save_table_png(cm_to_df(mBR), "plots/table_confusion_matrix_maxRecall.png",
                caption=sprintf("Confusion Matrix (t=%.2f, Max Recall)", best_rec_th))
 save_table_png(cm_to_df(mBF), "plots/table_confusion_matrix_bestF1.png",
