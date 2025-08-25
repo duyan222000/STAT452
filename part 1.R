@@ -157,6 +157,115 @@ p_after <- forest_final %>% select(where(is.numeric)) %>% pivot_longer(everythin
   labs(title="Numeric variables AFTER cleaning", x=NULL, y=NULL) + theme_minimal(12)
 save_png("plots/fig_box_after_iqr_and_cook's_distance.png", width=1400, height=1200, plot_expr = { print(p_after) })
 
+# =========================
+# BOX–COX STEP (custom, no MASS)
+# =========================
+
+# Ensure response is strictly positive
+eps <- 1e-6
+y_pos <- forest_final$log_area + eps
+
+# Model matrix for predictors (rhs was defined earlier)
+f_rhs <- reformulate(rhs)
+Xmat  <- model.matrix(f_rhs, data = forest_final)
+
+# BOX–COX
+
+
+# Ensure strictly-positive response for Box–Cox
+eps <- 1e-6
+y_raw <- forest_final$log_area
+y_pos <- y_raw + eps
+if (any(y_pos <= 0 | !is.finite(y_pos))) {
+  shift <- abs(min(y_pos[is.finite(y_pos)], na.rm = TRUE)) + 1e-3
+  y_pos <- y_pos + shift
+  message(sprintf("Box–Cox: shifted response by +%.6g to ensure positivity.", shift))
+}
+
+# Build the predictor set
+rhs <- intersect(
+  c("X","Y","month","day","FFMC","DMC","DC","ISI","temp","RH","wind","rain"),
+  names(forest_final)
+)
+
+# Drop predictors with zero variance
+rhs <- rhs[vapply(forest_final[rhs], function(col) length(unique(col)) > 1L, logical(1))]
+
+# Model matrices for fast fitting
+fml_x <- reformulate(rhs)           
+X <- model.matrix(fml_x, data = forest_final)
+n <- NROW(X)
+
+# Box–Cox profile log-likelihood:
+bc_loglik <- function(lambda, y, X) {
+  # Transform response
+  if (abs(lambda) < 1e-12) {
+    yt <- log(y)
+  } else {
+    yt <- (y^lambda - 1) / lambda
+  }
+  # OLS fit via lm.fit for speed/stability
+  fit <- lm.fit(X, yt)
+  rss <- sum(fit$residuals^2)
+  (lambda - 1) * sum(log(y)) - 0.5 * n * log(rss / n)
+}
+
+# Coarse grid search
+lambda_grid <- seq(-2, 2, by = 0.05)
+ll_vals <- vapply(lambda_grid, bc_loglik, numeric(1), y = y_pos, X = X)
+lambda_coarse <- lambda_grid[which.max(ll_vals)]
+
+# Refine with 1D optimize() around the best coarse point
+ref_lo <- max(-2, lambda_coarse - 0.25)
+ref_hi <- min( 2, lambda_coarse + 0.25)
+opt <- optimize(function(l) -bc_loglik(l, y_pos, X), interval = c(ref_lo, ref_hi))
+lambda_opt <- opt$minimum
+
+# Save the profile plot with chosen lambda marked
+save_png("plots/fig_boxcox_profile.png", width = 1200, height = 900, plot_expr = {
+  plot(lambda_grid, ll_vals, type = "l", lwd = 2,
+       xlab = expression(lambda), ylab = "Profile log-likelihood (up to const)",
+       main = sprintf("Box–Cox Profile (λ* ≈ %.3f)", lambda_opt))
+  abline(v = lambda_opt, col = "red", lty = 2, lwd = 2)
+})
+
+# Apply the Box–Cox transform using lambda_opt
+if (abs(lambda_opt) < 1e-12) {
+  y_bc <- log(y_pos)
+} else {
+  y_bc <- (y_pos^lambda_opt - 1) / lambda_opt
+}
+
+# Fit baseline (original log-scale + eps) vs Box–Cox model
+forest_final$log_area_pos <- y_pos  # keep for reproducibility
+fml_log <- reformulate(rhs, response = "log_area_pos")
+lm_log  <- lm(fml_log, data = forest_final)
+
+forest_final$y_boxcox <- y_bc
+fml_bc <- reformulate(rhs, response = "y_boxcox")
+lm_bc  <- lm(fml_bc, data = forest_final)
+
+# Compare in-sample fit (R^2 and overall F-test p-value)
+sum_log <- summary(lm_log); sum_bc <- summary(lm_bc)
+f_p_log <- pf(sum_log$fstatistic[1], sum_log$fstatistic[2], sum_log$fstatistic[3], lower.tail = FALSE)
+f_p_bc  <- pf(sum_bc$fstatistic[1],  sum_bc$fstatistic[2],  sum_bc$fstatistic[3],  lower.tail = FALSE)
+
+cmp_tbl <- data.frame(
+  Metric            = c("Multiple R-squared", "F-statistic p-value"),
+  `Original (log)`  = c(round(sum_log$r.squared, 4), signif(f_p_log, 4)),
+  `Box–Cox`         = c(round(sum_bc$r.squared, 4),  signif(f_p_bc,  4))
+)
+
+save_table_png(cmp_tbl, "plots/table_boxcox_compare.png",
+               caption = "Model performance before and after Box–Cox transform")
+
+# Residual diagnostics for the Box–Cox model
+save_png("plots/fig_residuals_boxcox.png", width = 1800, height = 1200, plot_expr = {
+  op <- par(mfrow = c(2,2))
+  plot(lm_bc)
+  par(op)
+})
+
 # REGRESSION (glmnet)
 split_r <- trainTestSplit(forest_final, seed = 0, trainRatio = .8)
 tr_r <- split_r$train; te_r <- split_r$test
